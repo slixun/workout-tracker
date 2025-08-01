@@ -1,0 +1,540 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en" manifest="/cache.manifest">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Workout Tracker</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="manifest" href="/manifest.json">
+  <style>
+    .exercise-edit {
+      cursor: move;
+    }
+    .exercise-edit.dragging {
+      opacity: 0.5;
+    }
+  </style>
+</head>
+<body class="bg-gray-100 font-sans min-h-screen">
+  <div class="container mx-auto p-4 max-w-2xl">
+    <h1 class="text-3xl font-bold mb-4 text-center">Workout Tracker</h1>
+    <div class="flex justify-center gap-4 mb-6 flex-wrap">
+      <button id="newPush" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">New Push Day</button>
+      <button id="newPull" class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600">New Pull Day</button>
+      <button id="addExercise" class="bg-purple-500 text-white px-4 py-2 rounded hover:bg-purple-600">Add New Exercise</button>
+      <button id="editExercises" class="bg-indigo-500 text-white px-4 py-2 rounded hover:bg-indigo-600">Edit Existing Exercises</button>
+    </div>
+    <div id="exerciseForm" class="mb-6"></div>
+    <div class="mb-4">
+      <label for="workoutFilter" class="block font-medium mb-2">Filter Workouts: <span id="workoutCount" class="text-gray-600">(Total: 0)</span></label>
+      <select id="workoutFilter" class="p-2 border rounded">
+        <option value="All">All</option>
+        <option value="Push">Push</option>
+        <option value="Pull">Pull</option>
+      </select>
+    </div>
+    <div id="workouts"></div>
+  </div>
+
+  <script>
+    // Register service worker for offline support
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/service-worker.js')
+        .then(() => console.log('Service Worker registered'))
+        .catch(err => console.error('Service Worker registration failed:', err));
+    }
+
+    // Initial exercises with provided stats
+    const initialExercises = [
+      { name: "Bench Press", type: "Push", stats: "22.5 kg 8, 22.5 kg 8, 22.5 kg 10" },
+      { name: "DB Shoulder Press", type: "Push", stats: "22.5 kg 8, 22.5 kg 8, 22.5 kg 7" },
+      { name: "Dips", type: "Push", stats: "10 kg 8, 10 kg 8, 10 kg 10" },
+      { name: "Tricep Extensions (Прямой гриф)", type: "Push", stats: "40 kg 9, 40 kg 9, 40 kg 7" },
+      { name: "Lateral Raises", type: "Push", stats: "12.5 kg 8, 12.5 kg 8, 12.5 kg 6" },
+      { name: "Bulgarian Split Squats", type: "Pull", stats: "22.5 kg 8, 22.5 kg 8, 22.5 kg 8" },
+      { name: "Pull Ups", type: "Pull", stats: "7.5 kg 8, 7.5 kg 8, 7.5 kg 7.5" },
+      { name: "Deadlift", type: "Pull", stats: "30 kg 8, 30 kg 8, 30 kg 9" },
+      { name: "Bicep Curls", type: "Pull", stats: "17.5 kg 8, 17.5 kg 8, 17.5 kg 10" },
+      { name: "Cable Row", type: "Pull", stats: "50 kg 8, 50 kg 8, 50 kg 6" },
+    ];
+
+    // Load or initialize data
+    let exercises = JSON.parse(localStorage.getItem("exercises")) || initialExercises;
+    let workouts = JSON.parse(localStorage.getItem("workouts")) || [];
+    let latestNotes = JSON.parse(localStorage.getItem("latestNotes")) || {
+      push: "Korean Debuff, Proper form",
+      pull: "Better form, Full motion",
+    };
+    let tempWorkout = null;
+    let isNewPushOpen = false;
+    let isNewPullOpen = false;
+    let isAddExerciseOpen = false;
+    let isEditExercisesOpen = false;
+    let workoutFilter = localStorage.getItem("workoutFilter") || "All";
+
+    // Save data to localStorage
+    function saveData() {
+      localStorage.setItem("exercises", JSON.stringify(exercises));
+      localStorage.setItem("workouts", JSON.stringify(workouts));
+      localStorage.setItem("latestNotes", JSON.stringify(latestNotes));
+      localStorage.setItem("workoutFilter", workoutFilter);
+    }
+
+    // Create a new workout
+    function createWorkout(type) {
+      const latestWorkout = workouts
+        .filter(w => w.type === type)
+        .sort((a, b) => b.id - a.id)[0];
+      const typeExercises = exercises.filter(ex => ex.type === type);
+      const latestStats = latestWorkout ? latestWorkout.stats.split("\n").reduce((acc, line) => {
+        const [name, stats] = line.split(": ");
+        acc[name] = stats;
+        return acc;
+      }, {}) : {};
+      const statsLines = typeExercises.map(ex => {
+        const stats = latestStats[ex.name] || ex.stats;
+        return `${ex.name}: ${stats}`;
+      }).join("\n");
+      const notes = latestWorkout ? latestWorkout.notes : latestNotes[type.toLowerCase()];
+
+      tempWorkout = {
+        id: Date.now(),
+        date: new Date().toLocaleString("en-GB", {
+          day: "numeric",
+          month: "long",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+          timeZone: "Etc/GMT-5" // GMT+5
+        }), // Formats as "31 July 2025, 19:29"
+        type,
+        stats: statsLines,
+        notes,
+      };
+      startEdit(null, tempWorkout);
+      if (type === "Push") isNewPushOpen = true;
+      if (type === "Pull") isNewPullOpen = true;
+    }
+
+    // Start editing a workout
+    function startEdit(id, temp = null) {
+      const workout = temp || workouts.find(w => w.id === id);
+      const workoutEl = document.getElementById(`workout-${workout.id}`) || document.createElement("div");
+      if (!document.getElementById(`workout-${workout.id}`)) {
+        workoutEl.id = `workout-${workout.id}`;
+        workoutEl.className = "bg-white p-4 mb-4 rounded shadow";
+        document.getElementById("workouts").prepend(workoutEl);
+      }
+      const statsLines = workout.stats.split("\n");
+      const editForm = `
+        <div class="mb-4">
+          ${statsLines.map(line => {
+            const [name, stats] = line.split(": ");
+            return `
+              <div class="mb-2">
+                <label class="block font-medium">${name}</label>
+                <input type="text" value="${stats}" data-exercise="${name}" class="w-full p-2 border rounded" placeholder="e.g., 22.5 kg 8, 8, 8">
+              </div>
+            `;
+          }).join("")}
+          <div class="mb-2">
+            <label class="block font-medium">Notes</label>
+            <textarea data-notes class="w-full p-2 border rounded" placeholder="Enter notes (e.g., Proper form, Felt strong)">${workout.notes}</textarea>
+          </div>
+          <div class="flex gap-2">
+            <button onclick="saveWorkout(${workout.id})" class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600">Save</button>
+            <button onclick="renderWorkouts()" class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600">Cancel</button>
+          </div>
+        </div>
+      `;
+      workoutEl.innerHTML = editForm;
+    }
+
+    // Save edited workout
+    function saveWorkout(id) {
+      const workoutEl = document.getElementById(`workout-${id}`);
+      const inputs = workoutEl.querySelectorAll("input");
+      const notes = workoutEl.querySelector("textarea[data-notes]").value.trim();
+      const newStats = Array.from(inputs).map(input => {
+        const exercise = input.dataset.exercise;
+        const stats = input.value.trim();
+        return `${exercise}: ${stats}`;
+      }).join("\n");
+
+      if (tempWorkout && tempWorkout.id === id) {
+        tempWorkout.stats = newStats;
+        tempWorkout.notes = notes;
+        workouts.unshift(tempWorkout);
+        latestNotes[tempWorkout.type.toLowerCase()] = notes;
+        tempWorkout = null;
+      } else {
+        const workout = workouts.find(w => w.id === id);
+        workout.stats = newStats;
+        workout.notes = notes;
+        const latestWorkout = workouts
+          .filter(w => w.type === workout.type)
+          .sort((a, b) => b.id - a.id)[0];
+        if (workout.id === latestWorkout.id) {
+          latestNotes[workout.type.toLowerCase()] = notes;
+        }
+      }
+      saveData();
+      alert("Workout saved successfully!");
+      renderWorkouts();
+    }
+
+    // Delete a workout
+    function deleteWorkout(id) {
+      if (confirm("Are you sure you want to delete this workout? This cannot be undone.")) {
+        workouts = workouts.filter(w => w.id !== id);
+        saveData();
+        renderWorkouts();
+      }
+    }
+
+    // Show add new exercise form
+    function showAddExerciseForm() {
+      const exerciseFormEl = document.getElementById("exerciseForm");
+      exerciseFormEl.innerHTML = `
+        <div class="bg-white p-4 mb-4 rounded shadow">
+          <h2 class="text-xl font-semibold mb-4">Add New Exercise</h2>
+          <div class="grid grid-cols-1 gap-4 p-4 bg-gray-50 rounded border">
+            <input id="newExerciseName" type="text" placeholder="Exercise Name (e.g., Squats)" class="p-2 border rounded">
+            <select id="newExerciseType" class="p-2 border rounded">
+              <option value="Push">Push</option>
+              <option value="Pull">Pull</option>
+            </select>
+            <input id="newExerciseStats" type="text" placeholder="Stats (e.g., 50 kg 8, 8, 8)" class="p-2 border rounded">
+          </div>
+          <div class="flex gap-2 mt-4">
+            <button onclick="saveNewExercise()" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">Save</button>
+            <button onclick="cancelExerciseEdit()" class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600">Cancel</button>
+          </div>
+        </div>
+      `;
+      isAddExerciseOpen = true;
+    }
+
+    // Show edit existing exercises form
+    function showEditExercisesForm() {
+      const pushExercises = exercises.filter(ex => ex.type === "Push");
+      const pullExercises = exercises.filter(ex => ex.type === "Pull");
+
+      const exerciseFormEl = document.getElementById("exerciseForm");
+      exerciseFormEl.innerHTML = `
+        <div class="bg-white p-4 mb-4 rounded shadow">
+          <h2 class="text-xl font-semibold mb-4">Edit Existing Exercises</h2>
+          <div class="mb-6">
+            <h3 class="font-medium mb-2 text-lg text-blue-600">Push Exercises</h3>
+            ${pushExercises.length ? pushExercises.map((ex, index) => `
+              <div class="p-4 mb-4 bg-gray-50 rounded border exercise-edit" draggable="true" data-index="${index}" data-type="Push" data-original='${JSON.stringify(ex)}'>
+                <div class="grid grid-cols-1 gap-4">
+                  <input type="text" value="${ex.name}" class="p-2 border rounded exercise-name" placeholder="Exercise Name">
+                  <select class="p-2 border rounded exercise-type">
+                    <option value="Push" ${ex.type === "Push" ? "selected" : ""}>Push</option>
+                    <option value="Pull" ${ex.type === "Pull" ? "selected" : ""}>Pull</option>
+                  </select>
+                  <input type="text" value="${ex.stats}" class="p-2 border rounded exercise-stats" placeholder="Stats">
+                </div>
+                <div class="flex gap-2 mt-4">
+                  <button onclick="saveExercise(this)" class="bg-green-500 text-white px-3 py-1 rounded hover:bg-green-600">Save</button>
+                  <button onclick="cancelExercise(this)" class="bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600">Cancel</button>
+                  <button onclick="deleteExercise(this)" class="bg-gray-500 text-white px-3 py-1 rounded hover:bg-gray-600">Delete</button>
+                </div>
+              </div>
+            `).join("") : "<p class='text-gray-500'>No Push exercises.</p>"}
+          </div>
+          <div>
+            <h3 class="font-medium mb-2 text-lg text-green-600">Pull Exercises</h3>
+            ${pullExercises.length ? pullExercises.map((ex, index) => `
+              <div class="p-4 mb-4 bg-gray-50 rounded border exercise-edit" draggable="true" data-index="${index + pushExercises.length}" data-type="Pull" data-original='${JSON.stringify(ex)}'>
+                <div class="grid grid-cols-1 gap-4">
+                  <input type="text" value="${ex.name}" class="p-2 border rounded exercise-name" placeholder="Exercise Name">
+                  <select class="p-2 border rounded exercise-type">
+                    <option value="Push" ${ex.type === "Push" ? "selected" : ""}>Push</option>
+                    <option value="Pull" ${ex.type === "Pull" ? "selected" : ""}>Pull</option>
+                  </select>
+                  <input type="text" value="${ex.stats}" class="p-2 border rounded exercise-stats" placeholder="Stats">
+                </div>
+                <div class="flex gap-2 mt-4">
+                  <button onclick="saveExercise(this)" class="bg-green-500 text-white px-3 py-1 rounded hover:bg-green-600">Save</button>
+                  <button onclick="cancelExercise(this)" class="bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600">Cancel</button>
+                  <button onclick="deleteExercise(this)" class="bg-gray-500 text-white px-3 py-1 rounded hover:bg-gray-600">Delete</button>
+                </div>
+              </div>
+            `).join("") : "<p class='text-gray-500'>No Pull exercises.</p>"}
+          </div>
+          <div class="flex gap-2 mt-6">
+            <button onclick="saveExerciseOrder()" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">Save Order</button>
+            <button onclick="cancelExerciseEdit()" class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600">Close</button>
+          </div>
+        </div>
+      `;
+      isEditExercisesOpen = true;
+      addDragAndDrop();
+      reattachButtonEvents();
+    }
+
+    // Add drag and drop functionality
+    function addDragAndDrop() {
+      const exerciseItems = document.querySelectorAll(".exercise-edit");
+      let draggedItem = null;
+
+      exerciseItems.forEach(item => {
+        item.addEventListener("dragstart", (e) => {
+          draggedItem = item;
+          e.target.classList.add("dragging");
+          e.dataTransfer.setData("text/plain", e.target.dataset.index);
+        });
+        item.addEventListener("dragend", (e) => {
+          e.target.classList.remove("dragging");
+          draggedItem = null;
+        });
+        item.addEventListener("dragover", (e) => {
+          e.preventDefault();
+        });
+        item.addEventListener("drop", (e) => {
+          e.preventDefault();
+          const fromIndex = parseInt(e.dataTransfer.getData("text/plain"));
+          const toElement = e.target.closest(".exercise-edit");
+          if (toElement && draggedItem && draggedItem.dataset.type === toElement.dataset.type) {
+            const toIndex = parseInt(toElement.dataset.index);
+            const container = toElement.parentNode;
+            if (fromIndex < toIndex) {
+              container.insertBefore(draggedItem, toElement.nextSibling);
+            } else {
+              container.insertBefore(draggedItem, toElement);
+            }
+            updateIndices(toElement.dataset.type);
+            reattachButtonEvents();
+          }
+        });
+      });
+    }
+
+    // Update indices after drag
+    function updateIndices(type) {
+      const items = Array.from(document.querySelectorAll(`.exercise-edit[data-type="${type}"]`));
+      items.forEach((item, index) => {
+        item.dataset.index = index;
+        const original = JSON.parse(item.dataset.original || '{}');
+        item.querySelector(".exercise-name").value = original.name || '';
+        item.querySelector(".exercise-type").value = original.type || 'Push';
+        item.querySelector(".exercise-stats").value = original.stats || '';
+      });
+    }
+
+    // Reattach button events
+    function reattachButtonEvents() {
+      const buttons = document.querySelectorAll(".exercise-edit button");
+      buttons.forEach(button => {
+        if (!button.hasAttribute("onclick")) {
+          const action = button.className.includes("save-exercise") ? "saveExercise(this)" :
+                        button.className.includes("cancel-exercise") ? "cancelExercise(this)" :
+                        button.className.includes("delete-exercise") ? "deleteExercise(this)" : "";
+          if (action) button.setAttribute("onclick", action);
+        }
+      });
+    }
+
+    // Save exercise order
+    function saveExerciseOrder() {
+      const pushItems = document.querySelectorAll('.exercise-edit[data-type="Push"]');
+      const pullItems = document.querySelectorAll('.exercise-edit[data-type="Pull"]');
+      const newExercises = [];
+      pushItems.forEach(item => {
+        const name = item.querySelector(".exercise-name").value.trim();
+        const type = item.querySelector(".exercise-type").value;
+        const stats = item.querySelector(".exercise-stats").value.trim();
+        newExercises.push({ name, type, stats });
+      });
+      pullItems.forEach(item => {
+        const name = item.querySelector(".exercise-name").value.trim();
+        const type = item.querySelector(".exercise-type").value;
+        const stats = item.querySelector(".exercise-stats").value.trim();
+        newExercises.push({ name, type, stats });
+      });
+      exercises = newExercises;
+      saveData();
+      alert("Exercise order updated successfully!");
+      cancelExerciseEdit();
+    }
+
+    // Save new exercise
+    function saveNewExercise() {
+      const newName = document.getElementById("newExerciseName").value.trim();
+      const newType = document.getElementById("newExerciseType").value;
+      const newStats = document.getElementById("newExerciseStats").value.trim();
+
+      if (newName && newType && newStats) {
+        if (exercises.find(ex => ex.name.toLowerCase() === newName.toLowerCase())) {
+          alert("An exercise with this name already exists.");
+          return;
+        }
+        exercises.push({ name: newName, type: newType, stats: newStats });
+        saveData();
+        alert("New exercise added successfully!");
+        cancelExerciseEdit();
+      } else {
+        alert("Please fill in all fields (Name, Type, Stats) to add a new exercise.");
+      }
+    }
+
+    // Save individual exercise
+    function saveExercise(button) {
+      const container = button.closest(".exercise-edit");
+      const name = container.querySelector(".exercise-name").value.trim();
+      const type = container.querySelector(".exercise-type").value;
+      const stats = container.querySelector(".exercise-stats").value.trim();
+      const original = JSON.parse(container.dataset.original);
+
+      if (!name || !stats) {
+        alert("Name and Stats are required.");
+        return;
+      }
+
+      if (exercises.find(ex => ex.name.toLowerCase() === name.toLowerCase() && ex.name !== original.name)) {
+        alert("An exercise with this name already exists.");
+        return;
+      }
+
+      const index = exercises.findIndex(ex => ex.name === original.name && ex.type === original.type && ex.stats === original.stats);
+      if (index !== -1) {
+        exercises[index] = { name, type, stats };
+        saveData();
+        alert("Exercise updated successfully!");
+        container.dataset.original = JSON.stringify({ name, type, stats });
+      }
+    }
+
+    // Cancel individual exercise edit
+    function cancelExercise(button) {
+      const container = button.closest(".exercise-edit");
+      const original = JSON.parse(container.dataset.original);
+      container.querySelector(".exercise-name").value = original.name;
+      container.querySelector(".exercise-type").value = original.type;
+      container.querySelector(".exercise-stats").value = original.stats;
+    }
+
+    // Delete individual exercise
+    function deleteExercise(button) {
+      if (confirm("Are you sure you want to delete this exercise? This will not affect existing workouts.")) {
+        const container = button.closest(".exercise-edit");
+        const original = JSON.parse(container.dataset.original);
+        if (original && original.name && original.type && original.stats) {
+          exercises = exercises.filter(ex => !(ex.name === original.name && ex.type === original.type && ex.stats === original.stats));
+          saveData();
+          showEditExercisesForm(); // Refresh the form to reflect the deletion
+        }
+      }
+    }
+
+    // Cancel entire form
+    function cancelExerciseEdit() {
+      document.getElementById("exerciseForm").innerHTML = "";
+      isAddExerciseOpen = false;
+      isEditExercisesOpen = false;
+    }
+
+    // Render workouts
+    function renderWorkouts() {
+      tempWorkout = null;
+      isNewPushOpen = false;
+      isNewPullOpen = false;
+      const workoutsEl = document.getElementById("workouts");
+      const filter = document.getElementById("workoutFilter").value;
+      workoutFilter = filter;
+      saveData();
+      const filteredWorkouts = filter === "All" ? workouts : workouts.filter(w => w.type === filter);
+      const count = filteredWorkouts.length;
+      document.getElementById("workoutCount").textContent = `(Total: ${count})`;
+      workoutsEl.innerHTML = filteredWorkouts.map(w => `
+        <div id="workout-${w.id}" class="bg-white p-4 mb-4 rounded shadow">
+          <h2 class="text-xl font-semibold">${w.type} Day - ${w.date}</h2>
+          <p class="mt-2 whitespace-pre-line">${w.stats}</p>
+          <p class="mt-2 text-gray-600">Notes: ${w.notes}</p>
+          <div class="flex gap-2 mt-2">
+            <button onclick="startEdit(${w.id})" class="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600">Edit</button>
+            <button onclick="deleteWorkout(${w.id})" class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600">Delete</button>
+          </div>
+        </div>
+      `).join("");
+    }
+
+    // Event listeners for buttons
+    document.getElementById("newPush").addEventListener("click", () => {
+      if (!isNewPushOpen) {
+        createWorkout("Push");
+      } else {
+        renderWorkouts();
+      }
+    });
+    document.getElementById("newPull").addEventListener("click", () => {
+      if (!isNewPullOpen) {
+        createWorkout("Pull");
+      } else {
+        renderWorkouts();
+      }
+    });
+    document.getElementById("addExercise").addEventListener("click", () => {
+      if (!isAddExerciseOpen) {
+        showAddExerciseForm();
+      } else {
+        cancelExerciseEdit();
+      }
+    });
+    document.getElementById("editExercises").addEventListener("click", () => {
+      if (!isEditExercisesOpen) {
+        showEditExercisesForm();
+      } else {
+        cancelExerciseEdit();
+      }
+    });
+    document.getElementById("workoutFilter").addEventListener("change", renderWorkouts);
+
+    // Initial render
+    document.getElementById("workoutFilter").value = workoutFilter;
+    renderWorkouts();
+  </script>
+</body>
+</html>
