@@ -1,43 +1,4 @@
-<script type="text/javascript">
-        var gk_isXlsx = false;
-        var gk_xlsxFileLookup = {};
-        var gk_fileData = {};
-        function filledCell(cell) {
-          return cell !== '' && cell != null;
-        }
-        function loadFileData(filename) {
-        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
-            try {
-                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
-                var firstSheetName = workbook.SheetNames[0];
-                var worksheet = workbook.Sheets[firstSheetName];
-
-                // Convert sheet to JSON to filter blank rows
-                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
-                // Filter out blank rows (rows where all cells are empty, null, or undefined)
-                var filteredData = jsonData.filter(row => row.some(filledCell));
-
-                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
-                var headerRowIndex = filteredData.findIndex((row, index) =>
-                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
-                );
-                // Fallback
-                if (headerRowIndex === -1 || headerRowIndex > 25) {
-                  headerRowIndex = 0;
-                }
-
-                // Convert filtered JSON back to CSV
-                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
-                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
-                return csv;
-            } catch (e) {
-                console.error(e);
-                return "";
-            }
-        }
-        return gk_fileData[filename] || "";
-        }
-        </script><!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en" manifest="/cache.manifest">
 <head>
   <meta charset="UTF-8">
@@ -111,16 +72,33 @@
     let isEditExercisesOpen = false;
     let workoutFilter = localStorage.getItem("workoutFilter") || "All";
 
+    // Load tempWorkout from localStorage if it exists
+    try {
+      tempWorkout = JSON.parse(localStorage.getItem("tempWorkout")) || null;
+    } catch (e) {
+      console.error("Error loading tempWorkout from localStorage:", e);
+      tempWorkout = null;
+    }
+
     // Save data to localStorage
     function saveData() {
-      localStorage.setItem("exercises", JSON.stringify(exercises));
-      localStorage.setItem("workouts", JSON.stringify(workouts));
-      localStorage.setItem("latestNotes", JSON.stringify(latestNotes));
-      localStorage.setItem("workoutFilter", workoutFilter);
+      try {
+        localStorage.setItem("exercises", JSON.stringify(exercises));
+        localStorage.setItem("workouts", JSON.stringify(workouts));
+        localStorage.setItem("latestNotes", JSON.stringify(latestNotes));
+        localStorage.setItem("workoutFilter", workoutFilter);
+        if (tempWorkout) localStorage.setItem("tempWorkout", JSON.stringify(tempWorkout));
+      } catch (e) {
+        console.error("Error saving data to localStorage:", e);
+      }
     }
 
     // Create a new workout
     function createWorkout(type) {
+      if (tempWorkout) {
+        alert("Please save or cancel the current workout before starting a new one.");
+        return;
+      }
       const latestWorkout = workouts
         .filter(w => w.type === type)
         .sort((a, b) => b.id - a.id)[0];
@@ -146,11 +124,12 @@
           minute: "2-digit",
           hour12: false,
           timeZone: "Etc/GMT-5" // GMT+5
-        }), // Formats as "31 July 2025, 19:29"
+        }),
         type,
         stats: statsLines,
         notes,
       };
+      localStorage.setItem("tempWorkout", JSON.stringify(tempWorkout)); // Save to localStorage
       startEdit(null, tempWorkout);
       if (type === "Push") isNewPushOpen = true;
       if (type === "Pull") isNewPullOpen = true;
@@ -173,21 +152,42 @@
             return `
               <div class="mb-2">
                 <label class="block font-medium">${name}</label>
-                <input type="text" value="${stats}" data-exercise="${name}" class="w-full p-2 border rounded" placeholder="e.g., 22.5 kg 8, 8, 8">
+                <input type="text" value="${stats}" data-exercise="${name}" class="w-full p-2 border rounded temp-input" placeholder="e.g., 22.5 kg 8, 8, 8">
               </div>
             `;
           }).join("")}
           <div class="mb-2">
             <label class="block font-medium">Notes</label>
-            <textarea data-notes class="w-full p-2 border rounded" placeholder="Enter notes (e.g., Proper form, Felt strong)">${workout.notes}</textarea>
+            <textarea data-notes class="w-full p-2 border rounded temp-input" placeholder="Enter notes (e.g., Proper form, Felt strong)">${workout.notes}</textarea>
           </div>
           <div class="flex gap-2">
             <button onclick="saveWorkout(${workout.id})" class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600">Save</button>
-            <button onclick="renderWorkouts()" class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600">Cancel</button>
+            <button onclick="cancelWorkout(${workout.id})" class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600">Cancel</button>
           </div>
         </div>
       `;
       workoutEl.innerHTML = editForm;
+
+      // Add event listeners to inputs to update tempWorkout in real-time
+      const inputs = workoutEl.querySelectorAll(".temp-input");
+      inputs.forEach(input => {
+        input.addEventListener("input", () => {
+          if (tempWorkout) {
+            if (input.dataset.exercise) {
+              const exercise = input.dataset.exercise;
+              const statsLines = tempWorkout.stats.split("\n");
+              const index = statsLines.findIndex(line => line.startsWith(`${exercise}:`));
+              if (index !== -1) {
+                statsLines[index] = `${exercise}: ${input.value.trim()}`;
+                tempWorkout.stats = statsLines.join("\n");
+              }
+            } else if (input.dataset.notes) {
+              tempWorkout.notes = input.value.trim();
+            }
+            localStorage.setItem("tempWorkout", JSON.stringify(tempWorkout));
+          }
+        });
+      });
     }
 
     // Save edited workout
@@ -207,6 +207,7 @@
         workouts.unshift(tempWorkout);
         latestNotes[tempWorkout.type.toLowerCase()] = notes;
         tempWorkout = null;
+        localStorage.removeItem("tempWorkout"); // Clear from localStorage
       } else {
         const workout = workouts.find(w => w.id === id);
         workout.stats = newStats;
@@ -220,6 +221,15 @@
       }
       saveData();
       alert("Workout saved successfully!");
+      renderWorkouts();
+    }
+
+    // Cancel workout editing
+    function cancelWorkout(id) {
+      if (tempWorkout && tempWorkout.id === id) {
+        tempWorkout = null;
+        localStorage.removeItem("tempWorkout"); // Clear from localStorage
+      }
       renderWorkouts();
     }
 
@@ -370,8 +380,8 @@
       buttons.forEach(button => {
         if (!button.hasAttribute("onclick")) {
           const action = button.className.includes("save-exercise") ? "saveExercise(this)" :
-                        button.className.includes("cancel-exercise") ? "cancelExercise(this)" :
-                        button.className.includes("delete-exercise") ? "deleteExercise(this)" : "";
+                         button.className.includes("cancel-exercise") ? "cancelExercise(this)" :
+                         button.className.includes("delete-exercise") ? "deleteExercise(this)" : "";
           if (action) button.setAttribute("onclick", action);
         }
       });
@@ -478,9 +488,6 @@
 
     // Render workouts
     function renderWorkouts() {
-      tempWorkout = null;
-      isNewPushOpen = false;
-      isNewPullOpen = false;
       const workoutsEl = document.getElementById("workouts");
       const filter = document.getElementById("workoutFilter").value;
       workoutFilter = filter;
@@ -499,23 +506,30 @@
           </div>
         </div>
       `).join("");
+
+      // If tempWorkout exists, keep the form open
+      if (tempWorkout) {
+        startEdit(null, tempWorkout);
+      }
     }
 
     // Event listeners for buttons
     document.getElementById("newPush").addEventListener("click", () => {
-      if (!isNewPushOpen) {
+      if (tempWorkout) {
+        alert("Please save or cancel the current workout before starting a new one.");
+      } else {
         createWorkout("Push");
-      } else {
-        renderWorkouts();
       }
     });
+
     document.getElementById("newPull").addEventListener("click", () => {
-      if (!isNewPullOpen) {
-        createWorkout("Pull");
+      if (tempWorkout) {
+        alert("Please save or cancel the current workout before starting a new one.");
       } else {
-        renderWorkouts();
+        createWorkout("Pull");
       }
     });
+
     document.getElementById("addExercise").addEventListener("click", () => {
       if (!isAddExerciseOpen) {
         showAddExerciseForm();
@@ -523,6 +537,7 @@
         cancelExerciseEdit();
       }
     });
+
     document.getElementById("editExercises").addEventListener("click", () => {
       if (!isEditExercisesOpen) {
         showEditExercisesForm();
@@ -530,11 +545,19 @@
         cancelExerciseEdit();
       }
     });
+
     document.getElementById("workoutFilter").addEventListener("change", renderWorkouts);
 
-    // Initial render
+    // Initial render and check for tempWorkout
     document.getElementById("workoutFilter").value = workoutFilter;
     renderWorkouts();
+
+    // If there's a tempWorkout, ensure the form is restored
+    if (tempWorkout) {
+      startEdit(null, tempWorkout);
+      if (tempWorkout.type === "Push") isNewPushOpen = true;
+      if (tempWorkout.type === "Pull") isNewPullOpen = true;
+    }
   </script>
 </body>
 </html>
